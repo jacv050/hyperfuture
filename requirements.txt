@@ -8,7 +8,6 @@ scikit-image==0.17.2
 scikit-learn==0.23.1
 scipy==1.5.1
 tensorboard==2.4.0
-torch==1.7.0.dev20200705
-torchvision==0.8.0.dev20200705
+torchvision==0.8.0
 tqdm==4.47.0
 transformations==2020.1.1
