@@ -116,6 +116,7 @@ def get_args():
 
     if args.local_rank == -1:
         args.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        #args.device = torch.device("cpu")
         args.n_gpu = args.step_n_gpus = torch.cuda.device_count()
     else:
         torch.cuda.set_device(args.local_rank)
@@ -207,6 +208,7 @@ def main():
 
     # ---------------------------- Prepare dataset ----------------------------- #
     splits = ['train', 'val', 'test']
+    #splits = ['train']
     loaders = {split:
                    datasets.get_data(args, split, return_label=args.use_labels,
                                      hierarchical_label=args.hierarchical_labels, action_level_gt=args.action_level_gt,

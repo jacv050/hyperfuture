@@ -148,6 +148,7 @@ class Model(nn.Module):
 
         hidden_all, hidden = self.agg(feature[:, 0:N - self.args.pred_step, :].contiguous())
         hidden = hidden[:, -1, :]  # after tanh, (-1,1). get the hidden state of last layer, last time step
+        self.hidden = hidden
 
         if self.args.use_labels:
             if self.args.linear_input == 'features_z':

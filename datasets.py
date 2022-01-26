@@ -3,6 +3,8 @@ import os
 import random
 import re
 from collections import defaultdict
+from collections import OrderedDict
+import sys
 
 import numpy as np
 import pandas as pd
@@ -18,7 +20,8 @@ from utils.augmentation import Image
 
 sizes_hierarchy = {
     'finegym': (307, [288, 15, 4]),
-    'hollywood2': (17, [12, 5])
+    'hollywood2': (17, [12, 5]),
+    'virtualhome' : (307, [288, 15, 4]) #Adaptar correctamente virtualhome con behaviour
 }
 
 
@@ -90,6 +93,7 @@ class Kinetics600(data.Dataset):
         # shuffle not necessary because use RandomSampler
 
         path_folders = os.path.join(self.path_dataset, mode)
+        # Read the folder with actions/classes and enumerate each of them
         valid_folders = [text for text in os.listdir(path_folders) if os.path.isdir(os.path.join(path_folders, text))]
         self.label_to_id = {text: i for i, text in enumerate(valid_folders)}
 
@@ -114,7 +118,8 @@ class Kinetics600(data.Dataset):
         assert idx_block.shape == (self.num_seq, self.seq_len)
         idx_block = idx_block.reshape(self.num_seq * self.seq_len)
 
-        seq = [pil_loader(os.path.join(self.path_dataset, vpath, 'image_%05d.jpg' % (i + 1))) for i in idx_block]
+        #seq = [pil_loader(os.path.join(self.path_dataset, vpath, 'image_%05d.jpg' % (i + 1))) for i in idx_block]
+        seq = [pil_loader(os.path.join(self.path_dataset, vpath, 'frame%d.jpg' % i)) for i in idx_block]
         t_seq = self.transform(seq)  # apply same transform
         (C, H, W) = t_seq[0].size()
         t_seq = torch.stack(t_seq, 0)
@@ -129,7 +134,6 @@ class Kinetics600(data.Dataset):
 
     def __len__(self):
         return len(self.video_info)
-
 
 class Hollywood2(data.Dataset):
     """
@@ -404,24 +408,29 @@ class FineGym(data.Dataset):
             path_clip = os.path.join(self.path_dataset, subfolder, f'{subclipidx}.mp4')
             if os.path.isfile(path_clip):
                 video, audio, info = torchvision.io.read_video(path_clip, start_pts=0, end_pts=None, pts_unit='sec')
-                video = video.float()
-                # Adapt to fps
-                step = int(np.round(info['video_fps'] / self.fps))
-                video_resampled = video[range(0, video.shape[0], step)]
-                # If the video is too long, trim (random position or middle, depending on mode)
-                if self.mode == 'train':
-                    start_subclip = random.randint(0, np.maximum(0, len(video_resampled) - self.seq_len))
+                #Patch
+                if(video.shape[0] == 0):
+                    video_padded = torch.zeros((3, self.seq_len, 128, 128))
                 else:
-                    start_subclip = np.maximum(0, len(video_resampled) - self.seq_len) // 2
-                video_trimmed = video_resampled[start_subclip:start_subclip + self.seq_len]
-                # [C T H W] is the format for the torchvision._transforms_video
-                video_resampled = video_trimmed.permute(3, 0, 1, 2)
-                # We transform at the subclip level. No need to have transformation consistency between clips
-                video_transformed = self.transform(video_resampled)  # apply same transform
-                # Zero-pad short clips
-                padding = [0, ] * 8
-                padding[5] = self.seq_len - video_transformed.shape[1]
-                video_padded = torch.nn.functional.pad(video_transformed, pad=padding, mode="constant", value=0)
+                    #video = video.float()
+                    # Adapt to fps
+                    step = int(np.round(info['video_fps'] / self.fps))
+                    video_resampled = video[range(0, video.shape[0], step)]
+                    # If the video is too long, trim (random position or middle, depending on mode)
+                    if self.mode == 'train':
+                        start_subclip = random.randint(0, np.maximum(0, len(video_resampled) - self.seq_len))
+                    else:
+                        start_subclip = np.maximum(0, len(video_resampled) - self.seq_len) // 2
+                    video_trimmed = video_resampled[start_subclip:start_subclip + self.seq_len]
+                    # [C T H W] is the format for the torchvision._transforms_video
+                    video_resampled = video_trimmed.permute(3, 0, 1, 2)
+                    # We transform at the subclip level. No need to have transformation consistency between clips
+                    video_resampled = video_resampled.float()
+                    video_transformed = self.transform(video_resampled)  # apply same transform
+                    # Zero-pad short clips
+                    padding = [0, ] * 8
+                    padding[5] = self.seq_len - video_transformed.shape[1]
+                    video_padded = torch.nn.functional.pad(video_transformed, pad=padding, mode="constant", value=0)
             else:
                 # print(f'{path_clip} is not a valid file')
                 video_padded = torch.zeros((3, self.seq_len, 128, 128))
@@ -468,6 +477,219 @@ class FineGym(data.Dataset):
     def __len__(self):
         return len(self.clips)
 
+
+class VirtualHome(data.Dataset):
+    """
+    If we select gym288, the number of classes to predict is:
+    - 288 in the subaction level
+    - 4 in the action level
+    - 307 in the hierarchical level (288 + 15 + 4)
+    """
+
+    def __init__(self,
+                 mode='train',
+                 path_dataset='',
+                 transform=None,
+                 seq_len=10,  # given duration distribution, we should aim for ~1.5 seconds (around 7-8 frames at 5 fps)
+                 num_seq=5,
+                 epsilon=5,
+                 return_label=False,
+                 gym288=True,
+                 fps=5,
+                 hierarchical_label=False,
+                 action_level_gt=False,
+                 return_idx=False,
+                 path_data_info=''):
+        self.path_dataset = path_dataset
+        self.mode = mode
+        self.transform = transform
+        self.seq_len = seq_len
+        self.num_seq = num_seq
+        self.epsilon = epsilon
+        self.return_label = return_label
+        self.fps = fps
+        self.hierarchical_label = hierarchical_label,
+        self.action_level_gt = action_level_gt
+        self.return_idx = return_idx
+        self.path_data_info = path_data_info
+
+        if mode in ['train', 'val']:
+            path_labels = 'virtualhome_train_labels.txt'
+        elif mode == 'test':
+            path_labels = 'virtualhome_val_labels.txt'
+        else:
+            raise ValueError('wrong mode')
+        path_labels = 'annotations/' + path_labels
+
+        with open(os.path.join(self.path_data_info, 'virtualhome/annotations/virtualhome_annotations.json'), 'r') as f:
+            self.annotations = json.load(f, object_pairs_hook=OrderedDict)
+
+        # Prepare superclasses
+        # First, load information about the available superclasses
+        self.parent_classes = {}
+        with open(os.path.join(self.path_data_info, 'virtualhome/categories/set_categories.txt'), 'r') as f:
+            #class_number = 19#TODO
+            class_number = 1
+            #class_number = 288 if gym288 else 99
+            set_grand_classes = set()
+            for line in f:
+                _, idx_class, name_class, _ = re.split(': |; |\\n', line)
+                # If there's only one element in the grand class, we still treat it as separate classes
+                grand_class = idx_class[0]
+                self.parent_classes[idx_class] = (class_number, name_class, grand_class)
+                set_grand_classes.add(grand_class)
+                class_number += 1
+        self.grand_classes = {name: class_number + i for i, name in enumerate(sorted(set_grand_classes))}
+
+        self.super_classes = {}
+        #path_categories = 'gym288_categories.txt' if gym288 else 'gym99_categories.txt'
+        path_categories = 'virtualhome_categories.txt'
+        with open(os.path.join(self.path_data_info, 'virtualhome/categories', path_categories), 'r') as f:
+            for line in f:
+                line_split = re.split(': |; ', re.sub(' +', ' ', line))
+                subclass = int(line_split[1])
+                superclass_parent_idx = line_split[3]
+                superclass_grand_idx = superclass_parent_idx[0]
+                self.super_classes[subclass] = (superclass_parent_idx, superclass_grand_idx)
+
+        #Añadimos todas las carpetas con secuencias de comportamientos
+        clips = []
+        print(os.listdir(path_dataset))
+        for dirs in os.listdir(path_dataset):
+            for dir in os.listdir(os.path.join(path_dataset, dirs)):
+                clips.append(os.path.join(path_dataset, dirs, dir))
+
+        #TODO *element sobra, las etiquetas al ser sintéticas deberían corresponderse, por si acaso mantendremos el formato.
+        #TODO plantearse el hacer redundante los element
+        self.subclipidx2label = {}
+        clips_in_labels = set()  # Some clips in "clips" may belong to another split or not even be in the *element.txt
+        with open(os.path.join(self.path_data_info, 'virtualhome', path_labels), 'r') as f:
+            for line in f:
+                data_split = line.replace('\n', '').split()
+                subclip_name = data_split[0]
+                self.subclipidx2label[subclip_name] = int(data_split[1])
+                clip_name = subclip_name[:27]
+                clips_in_labels.add(clip_name)
+
+        self.clips = {}
+        for clip in clips:
+            #TODO aplicar las equivalencias de las anotaciones
+            splitted = clip.split('/')
+            video_id = splitted[2] #Behaviour 'make-a-coffee'
+            #video_id = splitted[0]
+            event_id = splitted[3] #Number of scene '0'
+            segments = self.annotations[video_id][event_id]['segments']
+
+            if segments is not None and (len(segments) >= self.num_seq if self.return_label else
+                    # This is filtering out several short videos, approx 1/3 of the remaining videos for self.num_seq=6
+                    np.array([s['stages'] for s in segments.values()]).sum() >= self.num_seq):
+                if np.array([s['stages'] > 1 for s in segments.values()]).any() and not self.return_label:
+                    segments = {k1 + f'_{i}': {'timestamps': v1['timestamps'][i]} for k1, v1 in segments.items()
+                                for i in range(v1['stages'])}
+                self.clips[clip] = segments
+
+        if mode in ['train', 'val']:
+            labels_val = random.Random(500).sample(range(len(self.clips)), int(0.2 * len(self.clips)))
+            if mode == 'val':  # take only 20% of the labels of the "train" split
+                #labels_train = list(set(range(len(self.clips))) - set(labels_val)) #TODO delete
+                #labels_val = labels_train #TODO delete
+                self.clips = {k: v for i, (k, v) in enumerate(self.clips.items()) if i in labels_val}
+            else:  # mode == 'train':  # take the other 80% of the "train" split
+                labels_train = list(set(range(len(self.clips))) - set(labels_val))
+                self.clips = {k: v for i, (k, v) in enumerate(self.clips.items()) if i in labels_train}
+
+        self.idx2clipidx = {i: clipidx for i, clipidx in enumerate(self.clips.keys())}
+
+    def read_video(self, clipidx, segments):
+        # Sample self.num_seq consecutive actions from this segment
+        if self.mode == 'train':
+            start = random.randint(0, len(segments) - self.num_seq)
+        else:
+            start = (len(segments) - self.num_seq) // 2
+        actions = list(segments.keys())
+        total_clip = []
+        labels = []
+        #TODO clipidx guarda la referencia a la carpeta con los fotogramas, actions hace referencia en finygym al sufijo identificador 
+        # del clip para es acción. NECESARIO: adaptar el vector actions[?] de modo que cargue un rango de fotogramas en vez
+        # de un clip de video indexado por el sufijo del nombre.
+        clip_path_splitted = clipidx.split("/")
+        behaviourname = clip_path_splitted[-2]
+        clip = clip_path_splitted[-1]
+        ts_clip = self.annotations[behaviourname][clip]["timestamp"]
+        subclipidx = behaviourname + "-" + clip + "_E_" + "{}".format(int(ts_clip[0])).zfill(6) + "_" + "{}".format(int(ts_clip[1])).zfill(6) + "_A_"
+        #subclipidx = clipidx + '/video' #+ actions[i]
+        path_clip = f'{clipidx}/video.mp4'
+        if os.path.isfile(path_clip):
+            video, audio, info = torchvision.io.read_video(path_clip, start_pts=0, end_pts=None, pts_unit='sec')
+            
+            for i in range(start, start + self.num_seq):
+                #subfolder = 'action_videos' if len(actions[i]) == 11 else 'stage_videos'
+                #path_clip = os.path.join(self.path_dataset, subfolder, f'{subclipidx}.mp4')
+                ts = segments[actions[i]]["timestamp"]
+                clip = video[int(ts[0]):int(ts[1])]
+                
+                # Adapt to fps
+                step = int(np.round(info['video_fps'] / self.fps))
+                video_resampled = clip[range(0, clip.shape[0], step)]
+                # If the video is too long, trim (random position or middle, depending on mode)
+                if self.mode == 'train':
+                    start_subclip = random.randint(0, np.maximum(0, len(video_resampled) - self.seq_len))
+                else:
+                    start_subclip = np.maximum(0, len(video_resampled) - self.seq_len) // 2
+                video_trimmed = video_resampled[start_subclip:start_subclip + self.seq_len]
+                # [C T H W] is the format for the torchvision._transforms_video
+                video_resampled = video_trimmed.permute(3, 0, 1, 2)
+                # We transform at the subclip level. No need to have transformation consistency between clips
+                video_resampled = video_resampled.float()
+                video_transformed = self.transform(video_resampled)  # apply same transform
+                # Zero-pad short clips
+                padding = [0, ] * 8
+                padding[5] = self.seq_len - video_transformed.shape[1]
+                video_padded = torch.nn.functional.pad(video_transformed, pad=padding, mode="constant", value=0)
+                total_clip.append(video_padded)
+                
+                subclipidxa = subclipidx + "{}".format(int(ts[0])).zfill(4) + "_" + "{}".format(int(ts[1])).zfill(4)
+                #Define label
+                if self.hierarchical_label or self.action_level_gt:
+                    label_specific = self.subclipidx2label[subclipidxa]
+                    p_idx, g_idx = self.super_classes[label_specific]
+                    labels.append(torch.tensor([label_specific, self.parent_classes[p_idx][0],
+                                                self.grand_classes[g_idx]]))
+                else:
+                    labels.append(self.subclipidx2label[subclipidxa])
+                
+
+        else:
+            print(f'{path_clip} is not a valid file')
+            sys.exit(-1)
+            #video_padded = torch.zeros((3, self.seq_len, 128, 128))
+
+        total_clip = torch.stack(total_clip)
+        labels = torch.stack(labels)
+
+        if self.action_level_gt:
+            # All the subclips should have the same action grandparent, unless there's some "-1"
+            labels_to_consider = labels[:, -1][labels[:, -1] != -1]
+            if len(labels_to_consider) > 0:
+                assert torch.all(labels_to_consider == labels_to_consider[0]), 'What is going on?'
+                labels = labels_to_consider[0] - 288 - 15
+            else:
+                labels = torch.tensor(-1)
+
+        return total_clip, labels
+
+    def __getitem__(self, index):
+        clipidx = self.idx2clipidx[index]
+        segments = self.clips[clipidx]
+        video, labels = self.read_video(clipidx, segments)
+        if not self.return_label:
+            labels = torch.tensor(-1)
+        if self.return_idx:
+            return video, labels, index
+        return video, labels, index
+
+    def __len__(self):
+        return len(self.clips)
 
 class MovieNet(data.Dataset):
     def __init__(self, mode='train', transform=None, num_seq=5, path_dataset='', path_data_info=''):
@@ -535,9 +757,9 @@ class MovieNet(data.Dataset):
 
 def get_data(args, mode='train', return_label=False, hierarchical_label=False, action_level_gt=False,
              num_workers=0, path_dataset='', path_data_info=''):
-    if hierarchical_label and args.dataset not in ['finegym', 'hollywood2']:
+    if hierarchical_label and args.dataset not in ['finegym', 'hollywood2', 'virtualhome']:
         raise Exception('Hierarchical information is only implemented in finegym and hollywood2 datasets')
-    if return_label and not action_level_gt and args.dataset != 'finegym':
+    if return_label and not action_level_gt and (args.dataset != 'finegym' and args.dataset != 'virtualhome'):
         raise Exception('subaction only subactions available in finegym dataset')
 
     if mode == 'train':
@@ -582,6 +804,20 @@ def get_data(args, mode='train', return_label=False, hierarchical_label=False, a
         if hierarchical_label:
             assert not action_level_gt, 'finegym does not have hierarchical information at the action level'
         dataset = FineGym(mode=mode,
+                          transform=transform,
+                          seq_len=args.seq_len,
+                          num_seq=args.num_seq,
+                          fps=int(25 / args.ds),  # approx
+                          return_label=return_label,
+                          hierarchical_label=hierarchical_label,
+                          action_level_gt=action_level_gt,
+                          path_dataset=path_dataset,
+                          return_idx=False,
+                          path_data_info=path_data_info)
+    elif args.dataset == 'virtualhome':
+        if hierarchical_label:
+            assert not action_level_gt, 'finegym does not have hierarchical information at the action level'
+        dataset = VirtualHome(mode=mode,
                           transform=transform,
                           seq_len=args.seq_len,
                           num_seq=args.num_seq,

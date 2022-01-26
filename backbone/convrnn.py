@@ -27,6 +27,7 @@ class ConvGRUCell(nn.Module):
         if hidden_state is None:
             B, C, *spatial_dim = input_tensor.size()
             hidden_state = torch.zeros([B, self.hidden_size, *spatial_dim]).cuda()
+            #hidden_state = torch.zeros([B, self.hidden_size, *spatial_dim])
         # [B, C, H, W]
         combined = torch.cat([input_tensor, hidden_state], dim=1)  # concat in C
         update = torch.sigmoid(self.update_gate(combined))

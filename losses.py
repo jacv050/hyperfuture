@@ -12,7 +12,8 @@ def compute_loss(args, feature_dist, pred, labels, target, sizes_pred, sizes_mas
     else:
         results, loss = compute_selfsupervised_loss(args, pred, feature_dist, target, sizes_pred, sizes_mask, B)
 
-    to_return = [loss] + [torch.tensor(r).cuda() for r in results]
+    #to_return = [loss] + [torch.tensor(r).cuda() for r in results]
+    to_return = [loss] + [torch.tensor(r) for r in results]
     return to_return
 
 
@@ -32,11 +33,12 @@ def compute_supervised_loss(args, pred, labels, B):  # , top_down=False, separat
     if args.pred_future:
         assert (pred.shape[0] == B * args.num_seq) and (labels.shape[1] == args.num_seq)
         labels = labels[:, -1]
-        pred = pred.view(B, args.num_seq, -1)[:, -2]
+        #pred = pred.view(B, args.num_seq, -1)[:, -2]#TODO -2 because -1 label?
+        pred = pred.view(B, args.num_seq, -1)[:, -1] #Last sequence
 
     if not args.hierarchical_labels:
         hier_accuracies = -1
-        if labels.shape[0] < pred.shape[0]:
+        if labels.shape[0] < pred.shape[0]:         
             if len(labels.shape) == 1:  # Option 2
                 assert pred.shape[0] % labels.shape[0] == 0, \
                     'Maybe you are only using some predictions for some time steps and not all of them? In that ' \
@@ -70,7 +72,11 @@ def compute_supervised_loss(args, pred, labels, B):  # , top_down=False, separat
         gt[indices, labels] = 1
 
         loss = (- gt * torch.nn.functional.log_softmax(pred, -1)).sum() / gt.sum()  # CE loss with logit as ground truth
-        accuracies = (torch.argmax(pred[:, :sh[args.dataset][1][0]], dim=1) == labels[:, 0]).float()
+        p111 = sh[args.dataset][1][0]
+        p11 = pred[:, :sh[args.dataset][1][0]]
+        p1 = torch.argmax(pred[:, :sh[args.dataset][1][0]], dim=1)
+        p2 = labels[:, 0]
+        accuracies = (p1 == p2).float()
 
         hier_accuracies = []
         for top_down in [True, False]:
@@ -108,7 +114,8 @@ def compute_selfsupervised_loss(args, pred, feature_dist, target, sizes_pred, si
     # score is a 6d tensor: [B, P, SQ, B2, N, SQ]
     # similarity matrix is computed inside each gpu, thus here B == num_gpu * B2
     score_flattened = score.view(B * NP * SQ, B2 * NS * SQ)
-    target_flattened = target.view(B * NP * SQ, B2 * NS * SQ)
+    #target_flattened = target.flatten().view(B * NP * SQ, B2 * NS * SQ)
+    target_flattened = target.reshape(B * NP * SQ, B2 * NS * SQ)
     target_flattened = target_flattened.float().argmax(dim=1)
 
     loss = torch.nn.functional.cross_entropy(score_flattened, target_flattened)

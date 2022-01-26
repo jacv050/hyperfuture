@@ -5,6 +5,10 @@ import torch
 import torch.distributed as torch_dist
 from torch.cuda.amp import GradScaler, autocast
 from tqdm import tqdm
+from sklearn import decomposition
+import matplotlib.pyplot as plt
+import pandas as pd
+import numpy as np
 
 import losses
 from utils.utils import save_checkpoint, AverageMeter
@@ -74,18 +78,32 @@ class Trainer:
         stop_total = int(len(loader) * (self.args.partial if train else 1.0))
 
         with tqdm(loader, desc=desc, disable=self.args.local_rank > 0, total=stop_total) as t:
+            pca_features = []
+            pca_labels = []
             for idx, (input_seq, labels, *indices) in enumerate(t):
+                #Patch
+                #p = (labels != -1)[labels == False]
+                #p = labels[labels == -1]
+                #if(labels.shape[0] == 1 and len(labels[labels[0, :, 0] != -1]) == 0):
+                #if(labels.shape[0] == 1 and ((labels != -1)[False]).shape[0] != 0):
+                if(labels.shape[0] == 1 and labels[labels == -1].shape[0] != 0):
+                    continue
                 if idx >= stop_total:
                     break
                 # Measure data loading time
                 avg_meters['data_time'].update(time.time() - time_last)
                 input_seq = input_seq.to(self.args.device)
+                pca_labels.append(labels.detach().numpy()) #TODO plot
                 labels = labels.to(self.args.device)
 
                 # Get sequence predictions
                 with autocast(enabled=self.args.fp16):
                     with torch.set_grad_enabled(train):
                         output_model = self.model(input_seq, labels)
+                        #TODO plot
+                        #pca_features.append(self.model.hidden.reshape(-1).detach().numpy())
+                        pca_features.append(self.model.hidden.reshape(-1).detach().cpu().numpy())
+                        
 
                     if self.args.cross_gpu_score:
                         pred, feature_dist, sizes_pred = output_model
@@ -142,9 +160,24 @@ class Trainer:
                 print(f'[{epoch}/{self.args.epochs}]' +
                       ''.join([f'{k}: {", ".join([f"{v_:.04f}" for v_ in v.avg_expanded])}, '
                                for k, v in avg_meters.items() if v.count > 0]))
-                if not self.args.debug:
+                if not self.args.debug: # and len(accuracy_list) > 0:
                     self.writers['val'].add_scalar('global/loss', accuracy_list['losses'], epoch)
                     self.writers['val'].add_scalars('accuracy', accuracy_list, epoch)
+
+            #TODO Testing clustering in hyperbolic with PCA
+            #if True:#train:
+            mpca = False
+            if train and mpca:
+                pca = decomposition.PCA(n_components=2)
+                f = pca.fit_transform(pca_features)
+                principalDf = pd.DataFrame(data = f
+                    , columns = ['principal component 1', 'principal component 2'])
+                aux = np.array(pca_labels)[:,0,0,0] #action indexes
+                aux = np.array(['Prepare cloth', 'Ironing', 'Let iron', 'Take Iron'])[aux]#aux.tolist()
+                print(aux.shape)
+                df_labels = pd.DataFrame(data = aux, columns = ['target'])
+                finalDf = pd.concat([principalDf, df_labels[['target']]], axis = 1)
+                plot(finalDf)
 
             return accuracy_list if return_all_acc else accuracy_list['accuracy']
 
@@ -154,6 +187,29 @@ class Trainer:
         else:
             return self.model
 
+
+def plot(finalDf):
+    #fig = plt.figure(figsize = (8,8))
+    fig = plt.figure()
+    ax = fig.add_subplot(1,1,1) 
+    ax.set_xlabel('Principal Component 1', fontsize = 15)
+    ax.set_ylabel('Principal Component 2', fontsize = 15)
+    ax.set_title('2 component PCA', fontsize = 20)
+
+    targets = ['Prepare cloth', 'Ironing', 'Let iron', 'Take Iron']
+    colors = ['r', 'g', 'b', 'y']
+    for target, color in zip(targets,colors):
+        indicesToKeep = finalDf['target'] == target
+        ax.scatter(finalDf.loc[indicesToKeep, 'principal component 1']
+                , finalDf.loc[indicesToKeep, 'principal component 2']
+                , c = color
+                , s = 50)
+
+    #ax.plot(finalDf)
+
+    ax.grid()
+    fig.savefig('mplot.png')
+    plt.close()
 
 def gather_tensor(v):
     if v is None:
