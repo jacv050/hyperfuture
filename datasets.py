@@ -24,7 +24,6 @@ sizes_hierarchy = {
     'virtualhome' : (307, [288, 15, 4]) #Adaptar correctamente virtualhome con behaviour
 }
 
-
 def pil_loader(path):
     try:
         with open(path, 'rb') as f:
